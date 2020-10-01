@@ -45,6 +45,7 @@ type PluginScanner struct {
 	cfg                  *setting.Cfg
 	requireSigned        bool
 	log                  log.Logger
+	plugins              map[string]*PluginBase
 }
 
 type PluginManager struct {
@@ -114,8 +115,7 @@ func (pm *PluginManager) Init() error {
 		}
 	}
 
-	// check plugin paths defined in config
-	if err := pm.checkPluginPaths(); err != nil {
+	if err := pm.scanPluginPaths(); err != nil {
 		return err
 	}
 
@@ -144,6 +144,16 @@ func (pm *PluginManager) Init() error {
 		}
 	}
 
+	// 2nd pass to fix up any descendant plugins, to correspond to their root plugin
+	for _, p := range Plugins {
+		if p.IsCorePlugin || p.Root == nil || p.Signature == PluginSignatureInternal ||
+			p.Signature == PluginSignatureValid {
+			continue
+		}
+
+		p.Signature = p.Root.Signature
+	}
+
 	return nil
 }
 
@@ -166,7 +176,8 @@ func (pm *PluginManager) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (pm *PluginManager) checkPluginPaths() error {
+// scanPluginPaths scans configured plugin paths.
+func (pm *PluginManager) scanPluginPaths() error {
 	for pluginID, settings := range pm.Cfg.PluginSettings {
 		path, exists := settings["path"]
 		if !exists || path == "" {
@@ -191,6 +202,7 @@ func (pm *PluginManager) scan(pluginDir string, requireSigned bool) error {
 		log:                  pm.log,
 	}
 
+	// 1st pass: Scan plugins, also mapping plugins to their respective directories
 	if err := util.Walk(pluginDir, true, true, scanner.walker); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			pm.log.Debug("Couldn't scan directory since it doesn't exist", "pluginDir", pluginDir)
@@ -209,6 +221,19 @@ func (pm *PluginManager) scan(pluginDir string, requireSigned bool) error {
 	if len(scanner.errors) > 0 {
 		pm.log.Warn("Some plugins failed to load", "errors", scanner.errors)
 		pm.scanningErrors = scanner.errors
+	}
+
+	// 2nd pass: Detect any root plugins
+	for dpath, plugin := range scanner.plugins {
+		ancestors := filepath.SplitList(dpath)
+		ancestors = ancestors[0 : len(ancestors)-1]
+		// Try to find any root plugin
+		for _, a := range ancestors {
+			if root, ok := scanner.plugins[a]; ok {
+				plugin.Root = root
+				break
+			}
+		}
 	}
 
 	return nil
@@ -239,13 +264,15 @@ func (scanner *PluginScanner) walker(currentPath string, f os.FileInfo, err erro
 		return nil
 	}
 
-	if f.Name() == "plugin.json" {
-		err := scanner.loadPlugin(currentPath)
-		if err != nil {
-			scanner.log.Error("Failed to load plugin", "error", err, "pluginPath", filepath.Dir(currentPath))
-			scanner.errors = append(scanner.errors, err)
-		}
+	if f.Name() != "plugin.json" {
+		return nil
 	}
+
+	if err := scanner.loadPlugin(currentPath); err != nil {
+		scanner.log.Error("Failed to load plugin", "error", err, "pluginPath", filepath.Dir(currentPath))
+		scanner.errors = append(scanner.errors, err)
+	}
+
 	return nil
 }
 
@@ -260,6 +287,7 @@ func (scanner *PluginScanner) loadPlugin(pluginJsonFilePath string) error {
 
 	jsonParser := json.NewDecoder(reader)
 	pluginCommon := PluginBase{}
+	scanner.plugins[currentDir] = &pluginCommon
 	if err := jsonParser.Decode(&pluginCommon); err != nil {
 		return err
 	}

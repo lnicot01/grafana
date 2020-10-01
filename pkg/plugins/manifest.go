@@ -84,7 +84,7 @@ func readPluginManifest(body []byte) (*pluginManifest, error) {
 
 // getPluginSignatureState returns the signature state for a plugin.
 func getPluginSignatureState(log log.Logger, plugin *PluginBase) PluginSignature {
-	log.Debug("Getting signature state of plugin", "plugin", plugin.Id)
+	log.Debug("Getting signature state of plugin", "plugin", plugin.Id, "root", plugin.Root)
 	manifestPath := filepath.Join(plugin.PluginDir, "MANIFEST.txt")
 
 	byteValue, err := ioutil.ReadFile(manifestPath)
